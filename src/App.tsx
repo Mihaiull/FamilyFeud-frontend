@@ -6,9 +6,221 @@ import { Client } from '@stomp/stompjs';
 // @ts-ignore
 import SockJS from 'sockjs-client';
 
+// FetchSynonymsButton: Button with loading animation and feedback for fetching synonyms
+function FetchSynonymsButton(props: { questions: any[]; setSynonyms: (s: any) => void }) {
+  const { questions, setSynonyms } = props;
+  const [loading, setLoading] = React.useState(false);
+  const [dots, setDots] = React.useState('');
+  const [msg, setMsg] = React.useState<string | null>(null);
+  const intervalRef = React.useRef<any>(null);
+
+  React.useEffect(() => {
+    if (loading) {
+      intervalRef.current = setInterval(() => {
+        setDots(prev => prev === '...' ? '' : prev + '.');
+      }, 400);
+    } else {
+      setDots('');
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    }
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  }, [loading]);
+
+  async function handleFetch() {
+    setMsg(null);
+    const answerTexts = Array.from(new Set(
+      (questions || []).flatMap((q: any) => (q.answers || []).map((a: any) => a.text.trim().toLowerCase()))
+    ));
+    if (answerTexts.length === 0) {
+      setMsg('No answers to fetch synonyms for.');
+      return;
+    }
+    setLoading(true);
+    try {
+      const synRes = await fetch('http://localhost:8080/admin/synonyms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answers: answerTexts }),
+      });
+      if (synRes.ok) {
+        const synData = await synRes.json();
+        setSynonyms(synData);
+        setMsg('Synonyms updated!');
+      } else {
+        setSynonyms({});
+        setMsg('Failed to fetch synonyms.');
+      }
+    } catch {
+      setSynonyms({});
+      setMsg('Failed to fetch synonyms.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <button
+        style={{ color: 'green', fontSize: 13 }}
+        title="Fetch synonyms for all current answers"
+        onClick={handleFetch}
+        disabled={loading}
+      >
+        {loading ? `Updating${dots}` : 'Fetch Synonyms'}
+      </button>
+      {msg && <span style={{ fontSize: 13, color: msg.startsWith('Synonyms updated') ? 'green' : '#a00' }}>{msg}</span>}
+    </span>
+  );
+}
+
 // Simple Admin Panel (password protected)
 function AdminPanel() {
-  // Delete all handlers
+  // State for editing questions
+  const [editingQuestionId, setEditingQuestionId] = useState<number | null>(null);
+  const [editQText, setEditQText] = useState('');
+  const [editAnswers, setEditAnswers] = useState<{ text: string; points: string }[]>([]);
+  const [editStatus, setEditStatus] = useState<string | null>(null);
+
+  function handleEditClick(q: any) {
+    setEditingQuestionId(q.id);
+    setEditQText(q.question);
+    setEditAnswers(
+      (q.answers || []).map((a: any) => ({ text: a.text, points: String(a.points) }))
+        .concat(Array(Math.max(0, 8 - (q.answers?.length || 0))).fill({ text: '', points: '' }))
+    );
+    setEditStatus(null);
+  }
+
+  function handleEditAnswerChange(idx: number, field: 'text' | 'points', value: string) {
+    setEditAnswers(prev => prev.map((a, i) => i === idx ? { ...a, [field]: value } : a));
+  }
+
+  function handleEditCancel() {
+    setEditingQuestionId(null);
+    setEditQText('');
+    setEditAnswers([]);
+    setEditStatus(null);
+  }
+
+  async function handleEditSave(qid: number) {
+    setEditStatus(null);
+    if (!editQText.trim()) {
+      setEditStatus('Please enter a question.');
+      return;
+    }
+    const filtered = editAnswers.filter(a => a.text.trim() && a.points.trim());
+    if (filtered.length < 5) {
+      setEditStatus('Please enter at least 5 answers with points.');
+      return;
+    }
+    try {
+      // Only send {text, points} for each answer
+      const payloadAnswers = filtered.map(a => ({ text: a.text.trim(), points: Number(a.points) }));
+      const res = await fetch(`http://localhost:8080/admin/questions/${qid}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: editQText, answers: payloadAnswers }),
+      });
+      if (!res.ok) throw new Error('Failed to update question');
+      setEditStatus('Question updated!');
+      setEditingQuestionId(null);
+      setEditQText('');
+      setEditAnswers([]);
+      fetchDashboard();
+    } catch (err: any) {
+      setEditStatus('Error: ' + err.message);
+    }
+  }
+  // Import Questions from file (single instance, JS only, no type annotations)
+  const [importStatus, setImportStatus] = useState<string | null>(null);
+
+  function parseCSV(text: string): { question: string; answers: { text: string; points: number }[] }[] {
+    // Expecting: question,answer1,points1,answer2,points2,...
+    const lines = text.split(/\r?\n/).filter((l: string) => l.trim());
+    return lines.map((line: string) => {
+      const parts = line.split(',');
+      const question = parts[0];
+      const answers: { text: string; points: number }[] = [];
+      for (let i = 1; i < parts.length - 1; i += 2) {
+        if (parts[i] && parts[i+1]) {
+          answers.push({ text: parts[i], points: Number(parts[i+1]) });
+        }
+      }
+      return { question, answers };
+    });
+  }
+
+  function parseXML(text: string): { question: string; answers: { text: string; points: number }[] }[] {
+    // Very basic XML parser for: <questions><question text="..."><answer points="...">...</answer>...</question>...</questions>
+    const parser = new DOMParser();
+    const xml = parser.parseFromString(text, 'application/xml');
+    const qNodes = Array.from(xml.getElementsByTagName('question'));
+    return qNodes.map((qNode: Element) => {
+      const question = qNode.getAttribute('text') || '';
+      const answers: { text: string; points: number }[] = [];
+      Array.from(qNode.getElementsByTagName('answer')).forEach((aNode: Element) => {
+        answers.push({ text: aNode.textContent || '', points: Number(aNode.getAttribute('points')) });
+      });
+      return { question, answers };
+    });
+  }
+
+  function parseJSON(text: string): { question: string; answers: { text: string; points: number }[] }[] {
+    // Expecting array of { question, answers: [{ text, points }] }
+    try {
+      const arr = JSON.parse(text);
+      if (!Array.isArray(arr)) throw new Error('JSON must be an array');
+      return arr;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    setImportStatus(null);
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    const reader = new FileReader();
+    reader.onload = async (ev: ProgressEvent<FileReader>) => {
+      let questions: { question: string; answers: { text: string; points: number }[] }[] = [];
+      const text = String(ev.target?.result || '');
+      if (ext === 'csv') {
+        questions = parseCSV(text);
+      } else if (ext === 'xml') {
+        questions = parseXML(text);
+      } else if (ext === 'json') {
+        questions = parseJSON(text);
+      } else {
+        setImportStatus('Error: Unsupported file type.');
+        return;
+      }
+      // Filter out invalid
+      questions = questions.filter(q => q.question && Array.isArray(q.answers) && q.answers.length >= 1);
+      if (questions.length === 0) {
+        setImportStatus('Error: No valid questions found.');
+        return;
+      }
+      // Send to backend one by one (could be optimized)
+      let success = 0, fail = 0;
+      for (const q of questions) {
+        try {
+          const res = await fetch('http://localhost:8080/admin/questions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question: q.question, answers: q.answers }),
+          });
+          if (res.ok) success++;
+          else fail++;
+        } catch {
+          fail++;
+        }
+      }
+      setImportStatus(`Imported ${success} questions. ${fail ? fail + ' failed.' : ''}`);
+      if (success) fetchDashboard();
+    };
+    reader.readAsText(file);
+  }
   async function handleDeleteAllGames() {
     if (!window.confirm('Delete ALL games? This cannot be undone.')) return;
     try {
@@ -77,11 +289,6 @@ function AdminPanel() {
     setAnswers(prev => prev.map((a, i) => i === idx ? { ...a, [field]: value } : a));
   }
 
-  // Add missing handler for add answer
-  function handleAddAnswer() {
-    setAnswers(prev => [...prev, { text: '', points: '' }]);
-  }
-
   // Add missing handler for broadcast
   async function handleBroadcast(e: React.FormEvent) {
     e.preventDefault();
@@ -129,9 +336,7 @@ function AdminPanel() {
   const [authed, setAuthed] = useState(false);
   const [pw, setPw] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [synStatus, setSynStatus] = useState<string | null>(null);
-  const [synAnim, setSynAnim] = useState(0); // for animated dots
-  const [lastSynFetchQuestions, setLastSynFetchQuestions] = useState<string[]>([]); // track questions at last fetch
+  // Removed unused state: synStatus, synAnim, lastSynFetchQuestions
   const [qText, setQText] = useState('');
   const [answers, setAnswers] = useState(Array(8).fill({ text: '', points: '' }));
   // Fetch dashboard data
@@ -194,14 +399,14 @@ function AdminPanel() {
       setQaStatus('Please enter a question.');
       return;
     }
-    // At least one answer with text and points
+    // At least 5 answers with text and points
     const filtered = answers.filter(a => a.text.trim() && a.points.trim());
-    if (filtered.length < 1) {
-      setQaStatus('Please enter at least one answer and points.');
+    if (filtered.length < 5) {
+      setQaStatus('Please enter at least 5 answers with points.');
       return;
     }
     try {
-      // Convert points to number
+      // Only send {text, points} for each answer
       const payloadAnswers = filtered.map(a => ({ text: a.text.trim(), points: Number(a.points) }));
       const res = await fetch('http://localhost:8080/admin/questions', {
         method: 'POST',
@@ -367,45 +572,96 @@ function AdminPanel() {
                 <table border={1} cellPadding={4} style={{ minWidth: 400 }}>
                   <thead>
                     <tr>
-                      <th>Question</th>
-                      <th>Answers (with Synonyms)</th>
-                      <th>Actions</th>
+                      <th style={{ minWidth: 180 }}>Question</th>
+                      <th style={{ minWidth: 220 }}>Answers</th>
+                      <th style={{ minWidth: 120 }}>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {questions.length === 0 ? (
                       <tr><td colSpan={3} style={{ textAlign: 'center' }}>No questions</td></tr>
-                    ) : questions.map((q: any, i: number) => (
-                      <tr key={q.id || i}>
-                        <td>{q.question}</td>
-                        <td>
-                          {q.answers && Array.isArray(q.answers)
-                            ? q.answers.map((a: any, j: number) => {
-                                const syns = synonyms[a.text.trim().toLowerCase()] || [];
-                                return (
-                                  <div key={j} style={{ marginBottom: 4 }}>
-                                    <b>{a.text}</b> ({a.points})
-                                    {syns.length > 0 && (
-                                      <span style={{ color: '#888', marginLeft: 8 }}>
-                                        Synonyms: {syns.join(', ')}
-                                      </span>
-                                    )}
+                    ) : questions.map((q: any, i: number) => {
+                        // Debug: log the question object to the console
+                        // eslint-disable-next-line no-console
+                        console.log('Dashboard question row:', q);
+                        // If question text is blank, show a placeholder but still allow edit/delete
+                        const questionText = q.question || q.text || '';
+                        const isBlank = !questionText.trim();
+                        return editingQuestionId === q.id ? (
+                          <tr key={q.id || i}>
+                            <td colSpan={3}>
+                              <form onSubmit={e => { e.preventDefault(); handleEditSave(q.id); }}>
+                                <input
+                                  type="text"
+                                  value={editQText}
+                                  onChange={e => setEditQText(e.target.value)}
+                                  style={{ width: '100%', marginBottom: 4 }}
+                                  required
+                                />
+                                {editAnswers.map((a, j) => (
+                                  <div key={j} style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
+                                    <input
+                                      type="text"
+                                      placeholder={`Answer ${j + 1}`}
+                                      value={a.text}
+                                      onChange={e => handleEditAnswerChange(j, 'text', e.target.value)}
+                                    />
+                                    <input
+                                      type="number"
+                                      placeholder="Points"
+                                      value={a.points}
+                                      onChange={e => handleEditAnswerChange(j, 'points', e.target.value)}
+                                      min={0}
+                                      style={{ width: 60 }}
+                                    />
                                   </div>
-                                );
-                              })
-                            : ''}
-                        </td>
-                        <td>
-                          <button onClick={() => handleDeleteQuestion(q.id)} style={{ color: 'red' }}>Delete</button>
-                        </td>
-                      </tr>
-                    ))}
+                                ))}
+                                <div style={{ fontSize: 13, color: '#888', marginTop: 4 }}>
+                                  At least 5 answers with points are required to save.
+                                </div>
+                                <button type="submit">Save</button>
+                                <button type="button" onClick={handleEditCancel} style={{ marginLeft: 8 }}>Cancel</button>
+                                {editStatus && <div style={{ color: editStatus.startsWith('Error') ? 'red' : 'green', marginTop: 8 }}>{editStatus}</div>}
+                              </form>
+                            </td>
+                          </tr>
+                        ) : (
+                          <tr key={q.id || i}>
+                            <td
+                              style={{
+                                minWidth: 180,
+                                maxWidth: 400,
+                                wordBreak: 'break-word',
+                                whiteSpace: 'pre-line',
+                                background: 'transparent',
+                                border: '1px solid #e0e0e0',
+                                color: isBlank ? '#888' : undefined,
+                                fontStyle: isBlank ? 'italic' : undefined
+                              }}
+                            >
+                              {isBlank ? '(No question text)' : questionText}
+                            </td>
+                            <td style={{ minWidth: 220 }}>
+                              {(q.answers || []).map((a: any, j: number) => (
+                                <div key={j} style={{ marginBottom: 4 }}>
+                                  <b>{a.text}</b> ({a.points})
+                                </div>
+                              ))}
+                            </td>
+                            <td style={{ minWidth: 120 }}>
+                              <button onClick={() => handleEditClick(q)} style={{ color: 'blue', marginRight: 8 }}>Edit</button>
+                              <button onClick={() => handleDeleteQuestion(q.id)} style={{ color: 'red' }}>Delete</button>
+                            </td>
+                          </tr>
+                        );
+                      })}
                   </tbody>
                 </table>
               </div>
             <h4 style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               Synonyms
               <button style={{ color: 'red', fontSize: 13 }} title="Delete all synonyms" onClick={handleDeleteAllSynonyms}>Delete All</button>
+              <FetchSynonymsButton questions={questions} setSynonyms={setSynonyms} />
             </h4>
               <div style={{ overflowX: 'auto' }}>
                 <table border={1} cellPadding={4} style={{ minWidth: 400 }}>
@@ -448,7 +704,6 @@ function AdminPanel() {
                       placeholder={`Answer ${i + 1}`}
                       value={a.text}
                       onChange={e => handleAnswerChange(i, 'text', e.target.value)}
-                      required
                     />
                     <input
                       type="number"
@@ -456,16 +711,26 @@ function AdminPanel() {
                       value={a.points}
                       onChange={e => handleAnswerChange(i, 'points', e.target.value)}
                       min={0}
-                      required
                       style={{ width: 60 }}
                     />
                   </div>
                 ))}
-                <button type="button" onClick={handleAddAnswer} style={{ marginTop: 4 }}>Add Answer</button>
+                <div style={{ fontSize: 13, color: '#888', marginTop: 4 }}>
+                  At least 5 answers with points are required to submit.
+                </div>
               </div>
               <button type="submit">Add Question</button>
             </form>
             {qaStatus && <div style={{ color: qaStatus.startsWith('Error') ? 'red' : 'green', marginTop: 8 }}>{qaStatus}</div>}
+
+            {/* Import Questions Section */}
+            <div style={{ marginTop: 32, borderTop: '1px solid #ddd', paddingTop: 16 }}>
+              <h4>Import Questions from File</h4>
+              <input type="file" accept=".csv,.json,.xml" onChange={handleImportFile} />
+              {importStatus && (
+                <div style={{ color: typeof importStatus === 'string' && importStatus.startsWith('Error') ? 'red' : 'green', marginTop: 8 }}>{importStatus}</div>
+              )}
+            </div>
           </div>
         )}
         {tab === 'broadcast' && (
