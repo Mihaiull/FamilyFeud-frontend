@@ -1,4 +1,6 @@
+
 import './App.css';
+import { BACKEND_URL } from './config';
 import React, { useState, useEffect } from 'react';
 import { Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import { createGame, joinGame } from './api';
@@ -7,74 +9,54 @@ import { Client } from '@stomp/stompjs';
 import SockJS from 'sockjs-client';
 
 // FetchSynonymsButton: Button with loading animation and feedback for fetching synonyms
-function FetchSynonymsButton(props: { questions: any[]; setSynonyms: (s: any) => void }) {
-  const { questions, setSynonyms } = props;
-  const [loading, setLoading] = React.useState(false);
-  const [dots, setDots] = React.useState('');
-  const [msg, setMsg] = React.useState<string | null>(null);
-  const intervalRef = React.useRef<any>(null);
-
-  React.useEffect(() => {
-    if (loading) {
-      intervalRef.current = setInterval(() => {
-        setDots(prev => prev === '...' ? '' : prev + '.');
-      }, 400);
-    } else {
-      setDots('');
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    }
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [loading]);
-
-  async function handleFetch() {
-    setMsg(null);
-    const answerTexts = Array.from(new Set(
-      (questions || []).flatMap((q: any) => (q.answers || []).map((a: any) => a.text.trim().toLowerCase()))
-    ));
-    if (answerTexts.length === 0) {
-      setMsg('No answers to fetch synonyms for.');
-      return;
-    }
-    setLoading(true);
-    try {
-      const synRes = await fetch('http://localhost:8080/admin/synonyms', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ answers: answerTexts }),
-      });
-      if (synRes.ok) {
-        const synData = await synRes.json();
-        setSynonyms(synData);
-        setMsg('Synonyms updated!');
-      } else {
-        setSynonyms({});
-        setMsg('Failed to fetch synonyms.');
-      }
-    } catch {
-      setSynonyms({});
-      setMsg('Failed to fetch synonyms.');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <button
-        style={{ color: 'green', fontSize: 13 }}
-        title="Fetch synonyms for all current answers"
-        onClick={handleFetch}
-        disabled={loading}
-      >
-        {loading ? `Updating${dots}` : 'Fetch Synonyms'}
-      </button>
-      {msg && <span style={{ fontSize: 13, color: msg.startsWith('Synonyms updated') ? 'green' : '#a00' }}>{msg}</span>}
-    </span>
-  );
-}
 
 // Simple Admin Panel (password protected)
 function AdminPanel() {
+  // State for editing synonyms
+  const [editingSynonym, setEditingSynonym] = useState<string | null>(null);
+  const [editSynonymsText, setEditSynonymsText] = useState('');
+  const [editSynStatus, setEditSynStatus] = useState<string | null>(null);
+
+  // Handler for starting synonym edit
+  function handleEditSynonymStart(answer: string, syns: string[]) {
+    setEditingSynonym(answer);
+    setEditSynonymsText(syns.join(', '));
+    setEditSynStatus(null);
+  }
+
+  // Handler for canceling synonym edit
+  function handleEditSynonymCancel() {
+    setEditingSynonym(null);
+    setEditSynonymsText('');
+    setEditSynStatus(null);
+  }
+
+  // Handler for saving synonym edit
+  async function handleEditSynonymSave(answer: string) {
+    setEditSynStatus(null);
+    const trimmed = editSynonymsText.split(',').map(s => s.trim()).filter(Boolean);
+    if (trimmed.length === 0) {
+      setEditSynStatus('Please enter at least one synonym.');
+      return;
+    }
+    try {
+      // Backend expects { canonical, synonyms: "a,b,c" }
+      const payload = { canonical: answer, synonyms: trimmed.join(',') };
+      const res = await fetch(`${BACKEND_URL}/admin/synonyms/${encodeURIComponent(answer)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error('Failed to update synonyms');
+      // Update local state
+      setSynonyms(prev => ({ ...prev, [answer]: trimmed }));
+      setEditingSynonym(null);
+      setEditSynonymsText('');
+      setEditSynStatus('Synonyms updated!');
+    } catch (err: any) {
+      setEditSynStatus('Error: ' + err.message);
+    }
+  }
   // State for editing questions
   const [editingQuestionId, setEditingQuestionId] = useState<number | null>(null);
   const [editQText, setEditQText] = useState('');
@@ -116,7 +98,7 @@ function AdminPanel() {
     try {
       // Only send {text, points} for each answer
       const payloadAnswers = filtered.map(a => ({ text: a.text.trim(), points: Number(a.points) }));
-      const res = await fetch(`http://localhost:8080/admin/questions/${qid}`, {
+      const res = await fetch(`${BACKEND_URL}/admin/questions/${qid}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: editQText, answers: payloadAnswers }),
@@ -205,7 +187,7 @@ function AdminPanel() {
       let success = 0, fail = 0;
       for (const q of questions) {
         try {
-          const res = await fetch('http://localhost:8080/admin/questions', {
+          const res = await fetch(`${BACKEND_URL}/admin/questions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ question: q.question, answers: q.answers }),
@@ -224,7 +206,7 @@ function AdminPanel() {
   async function handleDeleteAllGames() {
     if (!window.confirm('Delete ALL games? This cannot be undone.')) return;
     try {
-      const res = await fetch('http://localhost:8080/admin/games', { method: 'DELETE' });
+      const res = await fetch(`${BACKEND_URL}/admin/games`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete all games');
       setGames([]);
     } catch (err: any) {
@@ -235,9 +217,25 @@ function AdminPanel() {
   async function handleDeleteAllPlayers() {
     if (!window.confirm('Delete ALL players? This cannot be undone.')) return;
     try {
-      const res = await fetch('http://localhost:8080/admin/players', { method: 'DELETE' });
+      const res = await fetch(`${BACKEND_URL}/admin/players`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete all players');
       setPlayers([]);
+    } catch (err: any) {
+      alert('Error: ' + err.message);
+    }
+  }
+
+    // Delete a single synonym entry
+  async function handleDeleteSynonym(answer: string) {
+    if (!window.confirm(`Delete synonyms for "${answer}"? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/admin/synonyms/${encodeURIComponent(answer)}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete synonym');
+      setSynonyms(prev => {
+        const copy: { [key: string]: string[] } = { ...prev };
+        delete copy[answer];
+        return copy;
+      });
     } catch (err: any) {
       alert('Error: ' + err.message);
     }
@@ -246,7 +244,7 @@ function AdminPanel() {
   async function handleDeleteAllQuestions() {
     if (!window.confirm('Delete ALL questions? This cannot be undone.')) return;
     try {
-      const res = await fetch('http://localhost:8080/admin/questions', { method: 'DELETE' });
+      const res = await fetch(`${BACKEND_URL}/admin/questions`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete all questions');
       setQuestions([]);
       setSynonyms({});
@@ -258,7 +256,7 @@ function AdminPanel() {
   async function handleDeleteAllSynonyms() {
     if (!window.confirm('Delete ALL synonyms? This cannot be undone.')) return;
     try {
-      const res = await fetch('http://localhost:8080/admin/synonyms', { method: 'DELETE' });
+      const res = await fetch(`${BACKEND_URL}/admin/synonyms`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete all synonyms');
       setSynonyms({});
     } catch (err: any) {
@@ -299,7 +297,7 @@ function AdminPanel() {
     }
     try {
       // Replace with your real broadcast endpoint
-      const res = await fetch('http://localhost:8080/admin/broadcast', {
+      const res = await fetch(`${BACKEND_URL}/admin/broadcast`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: broadcastMsg }),
@@ -316,7 +314,7 @@ function AdminPanel() {
   async function handleDeleteQuestion(id: number) {
     if (!window.confirm('Delete this question?')) return;
     try {
-      const res = await fetch(`http://localhost:8080/admin/questions/${id}`, { method: 'DELETE' });
+      const res = await fetch(`${BACKEND_URL}/admin/questions/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete question');
       setQuestions(qs => qs.filter(q => q.id !== id));
     } catch (err: any) {
@@ -345,9 +343,9 @@ function AdminPanel() {
     setDashboardError(null);
     try {
       const [gamesRes, playersRes, questionsRes] = await Promise.all([
-        fetch('http://localhost:8080/admin/games'),
-        fetch('http://localhost:8080/admin/players'),
-        fetch('http://localhost:8080/admin/questions'),
+        fetch(`${BACKEND_URL}/admin/games`),
+        fetch(`${BACKEND_URL}/admin/players`),
+        fetch(`${BACKEND_URL}/admin/questions`)
       ]);
       if (!gamesRes.ok || !playersRes.ok || !questionsRes.ok) throw new Error('Failed to fetch dashboard data');
       const [gamesData, playersData, questionsData] = await Promise.all([
@@ -359,22 +357,33 @@ function AdminPanel() {
       setPlayers(playersData);
       setQuestions(questionsData);
 
-      // Collect all unique answer texts from questions
-      const answerTexts = Array.from(new Set(
-        (questionsData || []).flatMap((q: any) => (q.answers || []).map((a: any) => a.text.trim().toLowerCase()))
-      ));
-      // Fetch only synonyms for these answers
-      if (answerTexts.length > 0) {
-        const synRes = await fetch('http://localhost:8080/admin/synonyms', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ answers: answerTexts }),
-        });
-        if (synRes.ok) {
-          const synData = await synRes.json(); // { answer: [syn1, syn2, ...], ... }
-          setSynonyms(synData);
+      // Always fetch all synonyms from the backend and log the result for debugging
+      const synRes = await fetch(`${BACKEND_URL}/admin/synonyms`);
+      if (synRes.ok) {
+        const synArr = await synRes.json(); // Raw backend response
+        console.log('Fetched synonyms from backend:', synArr); // Debug log
+        let synMap: { [answer: string]: string[] } = {};
+        let formatWarning = '';
+        if (Array.isArray(synArr)) {
+          for (const entry of synArr) {
+            // Accept both formats: { answer, synonyms: [] } and { canonical, synonyms: "a,b,c" }
+            if (entry.answer && Array.isArray(entry.synonyms)) {
+              synMap[entry.answer] = entry.synonyms;
+            } else if (entry.canonical && typeof entry.synonyms === 'string') {
+              synMap[entry.canonical] = entry.synonyms.split(',').map((s: string) => s.trim()).filter(Boolean);
+            } else {
+              formatWarning = 'Warning: Some entries missing canonical/answer or synonyms.';
+            }
+          }
+        } else if (typeof synArr === 'object' && synArr !== null) {
+          // If backend returns an object mapping
+          synMap = synArr;
         } else {
-          setSynonyms({});
+          formatWarning = 'Warning: Unexpected synonyms format from backend.';
+        }
+        setSynonyms(synMap);
+        if (formatWarning) {
+          setDashboardError(formatWarning);
         }
       } else {
         setSynonyms({});
@@ -408,7 +417,7 @@ function AdminPanel() {
     try {
       // Only send {text, points} for each answer
       const payloadAnswers = filtered.map(a => ({ text: a.text.trim(), points: Number(a.points) }));
-      const res = await fetch('http://localhost:8080/admin/questions', {
+      const res = await fetch(`${BACKEND_URL}/admin/questions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: qText, answers: payloadAnswers }),
@@ -661,28 +670,76 @@ function AdminPanel() {
             <h4 style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               Synonyms
               <button style={{ color: 'red', fontSize: 13 }} title="Delete all synonyms" onClick={handleDeleteAllSynonyms}>Delete All</button>
-              <FetchSynonymsButton questions={questions} setSynonyms={setSynonyms} />
+              {/* Synonyms sync now runs automatically after adding/importing questions */}
             </h4>
-              <div style={{ overflowX: 'auto' }}>
-                <table border={1} cellPadding={4} style={{ minWidth: 400 }}>
-                  <thead>
-                    <tr>
-                      <th>Answer</th>
-                      <th>Synonyms</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Object.keys(synonyms).length === 0 ? (
-                      <tr><td colSpan={2} style={{ textAlign: 'center' }}>No synonyms</td></tr>
-                    ) : Object.entries(synonyms).map(([answer, syns]) => (
+            {/* Synonyms Table: styled and functional like Questions table */}
+            <div style={{ overflowX: 'auto', marginBottom: 24 }}>
+              <table border={1} cellPadding={4} style={{ minWidth: 400 }}>
+                <thead>
+                  <tr>
+                    <th style={{ minWidth: 180 }}>Answer</th>
+                    <th style={{ minWidth: 220 }}>Synonyms</th>
+                    <th style={{ minWidth: 120 }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.keys(synonyms).length === 0 ? (
+                    <tr><td colSpan={3} style={{ textAlign: 'center' }}>No synonyms</td></tr>
+                  ) : Object.entries(synonyms).map(([answer, syns]) => (
+                    editingSynonym === answer ? (
                       <tr key={answer}>
-                        <td>{answer}</td>
-                        <td>{Array.isArray(syns) ? syns.join(', ') : ''}</td>
+                        <td style={{ minWidth: 180 }}>{answer}</td>
+                        <td style={{ minWidth: 220 }}>
+                          <form onSubmit={e => { e.preventDefault(); handleEditSynonymSave(answer); }}>
+                            <input
+                              type="text"
+                              value={editSynonymsText}
+                              onChange={e => setEditSynonymsText(e.target.value)}
+                              style={{ width: '100%' }}
+                              placeholder="Comma-separated synonyms"
+                              required
+                            />
+                            <div style={{ fontSize: 13, color: '#888', marginTop: 4 }}>
+                              Separate synonyms with commas.
+                            </div>
+                            <button type="submit">Save</button>
+                            <button type="button" onClick={handleEditSynonymCancel} style={{ marginLeft: 8 }}>Cancel</button>
+                            {editSynStatus && <div style={{ color: editSynStatus.startsWith('Error') ? 'red' : 'green', marginTop: 8 }}>{editSynStatus}</div>}
+                          </form>
+                        </td>
+                        <td style={{ minWidth: 120 }}></td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    ) : (
+                      <tr key={answer}>
+                        <td
+                          style={{
+                            minWidth: 180,
+                            maxWidth: 400,
+                            wordBreak: 'break-word',
+                            whiteSpace: 'pre-line',
+                            background: 'transparent',
+                            border: '1px solid #e0e0e0',
+                          }}
+                        >
+                          {answer}
+                        </td>
+                        <td style={{ minWidth: 220 }}>
+                          {Array.isArray(syns) ? syns.map((s, j) => (
+                            <div key={j} style={{ marginBottom: 4 }}>
+                              <b>{s}</b>
+                            </div>
+                          )) : ''}
+                        </td>
+                        <td style={{ minWidth: 120 }}>
+                          <button onClick={() => handleEditSynonymStart(answer, syns)} style={{ color: 'blue', marginRight: 8 }}>Edit</button>
+                          <button onClick={() => handleDeleteSynonym(answer)} style={{ color: 'red' }}>Delete</button>
+                        </td>
+                      </tr>
+                    )
+                  ))}
+                </tbody>
+              </table>
+            </div>
             </div>
           </div>
         )}
@@ -774,7 +831,7 @@ function Lobby() {
   // Helper to auto-assign team (even split)
   async function getAutoTeam(gameCode: string) {
     try {
-      const res = await fetch(`http://localhost:8080/games/${gameCode}/state`);
+      const res = await fetch(`${BACKEND_URL}/games/${gameCode}/state`);
       if (!res.ok) return 'RED';
       const data = await res.json();
       const redCount = data.players.filter((p: any) => p.team === 'RED').length;
@@ -869,7 +926,7 @@ function Lobby() {
         <h3>Create Game</h3>
         <input
           type="text"
-          placeholder="Topic (e.g. Animals)"
+          placeholder="Game Name (e.g. A murit Iliescu!)"
           value={topic}
           onChange={handleTopicChange}
           required
@@ -899,7 +956,7 @@ function Lobby() {
 
 // Helper to fetch game state
 async function fetchGameState(code: string) {
-  const res = await fetch(`http://localhost:8080/games/${code}/state`);
+  const res = await fetch(`${BACKEND_URL}/games/${code}/state`);
   if (!res.ok) throw new Error('Failed to fetch game state');
   return res.json();
 }
@@ -909,6 +966,8 @@ function GameRoom() {
   const [answer, setAnswer] = useState('');
   const [guessError, setGuessError] = useState<string | null>(null);
   const [guessSuccess, setGuessSuccess] = useState<string | null>(null);
+  const [startLoading, setStartLoading] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
 
   // Handler for submitting a guess
   async function handleGuess(e: React.FormEvent) {
@@ -921,7 +980,7 @@ function GameRoom() {
     }
     try {
       const myName = localStorage.getItem('ff_name');
-      const res = await fetch(`http://localhost:8080/games/${game.code}/guess`, {
+      const res = await fetch(`${BACKEND_URL}/games/${game.code}/guess`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ player: myName, answer }),
@@ -970,7 +1029,7 @@ function GameRoom() {
     if (!code) return;
     // Create STOMP client
     const client = new Client({
-      webSocketFactory: () => new SockJS('http://localhost:8080/ws'),
+      webSocketFactory: () => new SockJS(`${BACKEND_URL}/ws`),
       debug: () => {},
       reconnectDelay: 5000,
     });
@@ -994,12 +1053,16 @@ function GameRoom() {
 
   // Handler for starting the game (button only visible to host)
   async function handleStartGame() {
+    setStartLoading(true);
+    setStartError(null);
     try {
-      const res = await fetch(`http://localhost:8080/games/${game.code}/start`, { method: 'POST' });
+      const res = await fetch(`${BACKEND_URL}/games/${game.code}/start`, { method: 'POST' });
       if (!res.ok) throw new Error('Failed to start game');
       // No need to update state here; WebSocket will update all clients
     } catch (err: any) {
-      alert('Error starting game: ' + err.message);
+      setStartError('Error starting game: ' + err.message);
+    } finally {
+      setStartLoading(false);
     }
   }
 
@@ -1009,10 +1072,16 @@ function GameRoom() {
   // Get current player name from localStorage
   const myName = localStorage.getItem('ff_name');
 
+  // Faceoff UI logic (after game is loaded)
+  const isFaceoff = game.status === 'FACEOFF';
+  const faceoffPlayers = Array.isArray(game.faceoffPlayers) ? game.faceoffPlayers : [];
+  const faceoffWinner = game.faceoffWinner || null;
+  const isFaceoffPlayer = faceoffPlayers.some((p: any) => p.name === myName);
+
   return (
     <div style={{ maxWidth: 600, margin: '2rem auto' }}>
       <h2>Game Room: {game.code}</h2>
-      <div>Topic: <b>{game.topic}</b></div>
+      <div>Game Name: <b>{game.topic}</b></div>
       <div>Status: {game.status}</div>
       <div>Round: {game.roundNumber}</div>
       <div>Current Team: {game.currentTeam}</div>
@@ -1020,9 +1089,59 @@ function GameRoom() {
       <div>Scores: <span style={{ color: 'red' }}>Red {game.redScore}</span> | <span style={{ color: 'blue' }}>Blue {game.blueScore}</span></div>
       {/* Start Game button, only visible in LOBBY state and for host */}
       {game.status === 'LOBBY' && isHost && (
-        <button onClick={handleStartGame} style={{ margin: '16px 0', padding: '8px 16px' }}>
-          Start Game
-        </button>
+        <div>
+          <button onClick={handleStartGame} style={{ margin: '16px 0', padding: '8px 16px' }} disabled={startLoading}>
+            {startLoading ? 'Starting...' : 'Start Game'}
+          </button>
+          {startError && <div style={{ color: 'red', marginTop: 8 }}>{startError}</div>}
+        </div>
+      )}
+
+      {/* Faceoff UI: Only show in FACEOFF state */}
+      {isFaceoff && (
+        <div style={{ margin: '24px 0', padding: '16px', background: '#fffbe6', borderRadius: 8, boxShadow: '0 2px 8px #0002' }}>
+          <div style={{ fontSize: 18, fontWeight: 'bold', marginBottom: 8 }}>Faceoff Round!</div>
+          <div style={{ marginBottom: 12 }}>
+            <b>Players:</b>
+            <ul style={{ margin: '8px 0 0 0', padding: 0, listStyle: 'none', display: 'flex', gap: 24 }}>
+              {faceoffPlayers.map((p: any) => (
+                <li key={p.name} style={{ color: p.team === 'RED' ? 'red' : 'blue', fontWeight: 'bold', fontSize: 16 }}>
+                  {p.name} ({p.team})
+                  {p.name === myName && ' ← you'}
+                </li>
+              ))}
+            </ul>
+          </div>
+          {faceoffWinner ? (
+            <div style={{ fontSize: 16, color: faceoffWinner === 'RED' ? 'red' : 'blue', fontWeight: 'bold', marginBottom: 8 }}>
+              {faceoffWinner} team wins the faceoff!
+            </div>
+          ) : (
+            <div style={{ fontSize: 15, marginBottom: 8 }}>
+              First to answer correctly wins control!
+            </div>
+          )}
+          {/* Only allow faceoff players to answer */}
+          {isFaceoffPlayer && !faceoffWinner && (
+            <form onSubmit={handleGuess} style={{ margin: '16px 0' }}>
+              <input
+                type="text"
+                placeholder="Your answer..."
+                value={answer}
+                onChange={e => setAnswer(e.target.value)}
+                style={{ width: '60%', marginRight: 8 }}
+              />
+              <button type="submit">Answer</button>
+              {guessError && <div style={{ color: 'red', marginTop: 8 }}>{guessError}</div>}
+              {guessSuccess && <div style={{ color: 'green', marginTop: 8 }}>{guessSuccess}</div>}
+            </form>
+          )}
+          {!isFaceoffPlayer && !faceoffWinner && (
+            <div style={{ color: '#888', fontStyle: 'italic', marginTop: 8 }}>
+              Waiting for faceoff players to answer...
+            </div>
+          )}
+        </div>
       )}
 
       {/* Guessing UI: only show if IN_PROGRESS and player is on current team */}
@@ -1068,7 +1187,7 @@ function GameRoom() {
 }
 
 function NotFound() {
-  return <h2>404 - Page Not Found</h2>;
+  return <h2>404 - You ended up to a nonexistent page dum dum</h2>;
 }
 
 function App() {
